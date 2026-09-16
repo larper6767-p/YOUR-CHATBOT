@@ -1,0 +1,89 @@
+{
+  "scenes": {
+    "poolside": {
+      "name": "Poolside",
+      "description": "A sunny pool area with lounge chairs and sparkling water",
+      "emoji": "🏊",
+      "atmosphere": "The sparkling blue pool glistens under the sunlight. Lounge chairs are scattered around, some with towels draped over them. The scent of chlorine mixes with coconut sunscreen. Water drips from the edge of the pool, creating small ripples. It's warm and inviting, with the sound of water lapping gently. The air is humid and heated.",
+      "tags": [
+        "outdoor",
+        "water",
+        "summer",
+        "daytime"
+      ]
+    },
+    "living_room": {
+      "name": "Living Room",
+      "description": "Cozy living room with a comfortable couch",
+      "emoji": "🛋️",
+      "atmosphere": "The living room is warm and inviting. A large couch dominates the space, perfect for lounging. The TV is on but muted. Soft lighting from lamps creates a relaxed atmosphere. The air smells of home—a mix of fabric softener and subtle air freshener. It's comfortable and casual.",
+      "tags": [
+        "indoor",
+        "casual",
+        "comfortable",
+        "home"
+      ]
+    },
+    "kitchen": {
+      "name": "Kitchen",
+      "description": "Modern kitchen with counters and appliances",
+      "emoji": "🍳",
+      "atmosphere": "The kitchen is clean and modern. Sunlight streams through the window. The counter is cool marble, perfect for leaning against. The fridge hums quietly in the background. There's a faint scent of coffee or something freshly cooked. It's domestic and intimate.",
+      "tags": [
+        "indoor",
+        "domestic",
+        "casual",
+        "daytime"
+      ]
+    },
+    "beach": {
+      "name": "Beach",
+      "description": "Sandy beach with ocean waves",
+      "emoji": "🏖️",
+      "atmosphere": "The beach stretches out with golden sand and crashing waves. The sun beats down, making everything warm. The salty ocean air fills your lungs. Seagulls cry overhead. The sound of waves is constant and soothing. It's open, free, and perfect for summer fun.",
+      "tags": [
+        "outdoor",
+        "water",
+        "summer",
+        "public"
+      ]
+    },
+    "school_classroom": {
+      "name": "School Classroom",
+      "description": "Empty classroom after hours",
+      "emoji": "🏫",
+      "atmosphere": "The classroom is empty and quiet—school has ended for the day. Desks are arranged in neat rows. The chalkboard has some writing left on it. Sunlight streams through the windows, casting long shadows. The air smells of chalk dust and paper. It's private and slightly forbidden.",
+      "tags": [
+        "indoor",
+        "school",
+        "private",
+        "afternoon"
+      ]
+    },
+    "gym": {
+      "name": "Gym",
+      "description": "Workout gym with equipment and mirrors",
+      "emoji": "💪",
+      "atmosphere": "The gym is filled with equipment and floor-to-ceiling mirrors. The air smells of sweat and rubber. Music plays from speakers. The temperature is warm from body heat and exertion. Everything is clean but well-used. The mirrors reflect every angle.",
+      "tags": [
+        "indoor",
+        "athletic",
+        "public",
+        "active"
+      ]
+    },
+    "movie_theater": {
+      "name": "Movie Theater",
+      "description": "Dark movie theater during a film",
+      "emoji": "🎬",
+      "atmosphere": "The movie theater is dark, with only the screen providing flickering light. The seats are comfortable and reclined. The sound system booms, covering other noises. The air smells of popcorn and candy. It's public but anonymous in the darkness. Perfect for sneaky touching.",
+      "tags": [
+        "indoor",
+        "dark",
+        "public",
+        "playful"
+      ]
+    }
+  },
+  "current_scene": "school_classroom"
+}
