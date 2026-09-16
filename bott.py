@@ -210,6 +210,211 @@ wardrobe = load_wardrobe()
 scenes = load_scenes()
 
 # ─────────────────────────────────────────────
+#  Per-User Profile Store
+# ─────────────────────────────────────────────
+PROFILES_FILE = os.path.join(os.path.dirname(__file__), "user_profiles.json")
+DEFAULT_PROFILE_SCHEMA = {
+    "nickname": None,
+    "relationship_stage": "new",
+    "tone_preference": "default",
+    "recurring_topics": [],
+    "last_scene": None,
+    "memory_summary": "",
+    "message_count": 0,
+    "last_interaction": "",
+    "verified": False
+}
+# Relationship stage thresholds (configurable via personality.json settings.relationship)
+_RELATIONSHIP_THRESHOLDS = personality.get("settings", {}).get("relationship", {
+    "familiar_at": 20,
+    "close_at": 100
+})
+
+
+def load_profiles() -> dict:
+    """Load per-user profiles."""
+    if os.path.exists(PROFILES_FILE):
+        try:
+            with open(PROFILES_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"⚠️  Error loading user profiles: {e}")
+    return {}
+
+
+def save_profiles(profiles: dict):
+    """Save per-user profiles to disk."""
+    try:
+        with open(PROFILES_FILE, "w", encoding="utf-8") as f:
+            json.dump(profiles, f, indent=2, ensure_ascii=False)
+    except OSError as e:
+        print(f"❌  Error saving user profiles: {e}")
+
+
+user_profiles = load_profiles()
+
+
+def get_or_create_profile(user_id: int) -> dict:
+    """Get the profile for a user, creating it if it doesn't exist."""
+    key = str(user_id)
+    if key not in user_profiles:
+        user_profiles[key] = dict(DEFAULT_PROFILE_SCHEMA)
+        user_profiles[key]["last_interaction"] = datetime.now(timezone.utc).isoformat()
+        save_profiles(user_profiles)
+    profile = user_profiles[key]
+    # Fill in any missing keys (schema evolution)
+    for field, default in DEFAULT_PROFILE_SCHEMA.items():
+        if field not in profile:
+            profile[field] = default
+    return profile
+
+
+def update_profile(user_id: int, **fields):
+    """Update specific fields on a user's profile and save."""
+    profile = get_or_create_profile(user_id)
+    for field, value in fields.items():
+        if field in DEFAULT_PROFILE_SCHEMA:
+            profile[field] = value
+    save_profiles(user_profiles)
+
+
+def get_relationship_stage(message_count: int) -> str:
+    """Determine relationship stage from message count thresholds."""
+    familiar_at = _RELATIONSHIP_THRESHOLDS.get("familiar_at", 20)
+    close_at = _RELATIONSHIP_THRESHOLDS.get("close_at", 100)
+    if message_count >= close_at:
+        return "close"
+    elif message_count >= familiar_at:
+        return "familiar"
+    return "new"
+
+
+MEMORY_SUMMARY_INTERVAL = 15
+MEMORY_SUMMARY_MAX_CHARS = 500
+
+
+async def summarize_conversation(cid: str, user_id: int):
+    """Summarize the conversation history for a cid, merging with existing memory_summary."""
+    history = conversation_histories.get(cid, [])
+    if not history:
+        return
+
+    profile = get_or_create_profile(user_id)
+    existing_summary = profile.get("memory_summary", "")
+
+    # Build a transcript from recent history
+    transcript_parts = []
+    for msg in history[-30:]:  # cap the input to avoid huge prompts
+        role = msg.get("role", "")
+        content = (msg.get("content") or "")[:300]
+        if role in ("user", "assistant"):
+            transcript_parts.append(f"{role}: {content}")
+    transcript = "\n".join(transcript_parts)
+    if not transcript.strip():
+        return
+
+    model_name = personality.get("settings", {}).get("model", {}).get("name", "agnes-3.0-flash")
+
+    summary_prompt_parts = []
+    if existing_summary:
+        summary_prompt_parts.append(f"PREVIOUS SUMMARY:\n{existing_summary}")
+    summary_prompt_parts.append(f"NEW CONVERSATION EXCERPT:\n{transcript}")
+    summary_prompt_parts.append(
+        "Write a 2-4 sentence factual summary of the conversation so far. "
+        "Include interests mentioned, ongoing bits, and user preferences expressed. "
+        "Be concise, under 300 words."
+    )
+
+    try:
+        response = await agnes_client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "system", "content": "You are a memory summarizer. " + "\n".join(summary_prompt_parts)}],
+            max_tokens=600,
+            temperature=0.3,
+        )
+        new_summary = (response.choices[0].message.content or "").strip()
+        if new_summary:
+            # Cap to MEMORY_SUMMARY_MAX_CHARS
+            if len(new_summary) > MEMORY_SUMMARY_MAX_CHARS:
+                new_summary = new_summary[:MEMORY_SUMMARY_MAX_CHARS]
+            update_profile(user_id, memory_summary=new_summary)
+            print(f"🧠  Memory summary updated for user {user_id} ({cid})")
+    except Exception as e:
+        print(f"❌  Memory summarization failed for user {user_id}: {e}")
+
+
+# ─────────────────────────────────────────────
+#  LLM Call with Retry
+# ─────────────────────────────────────────────
+
+
+async def agnes_chat_create(messages: list, settings: dict, max_retries: int = 2) -> str | None:
+    """Call agnes_client with exponential-backoff retry. Returns reply string or None."""
+    model_name = personality.get("settings", {}).get("model", {}).get("name", "agnes-3.0-flash")
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = await agnes_client.chat.completions.create(
+                model=model_name,
+                messages=cast(list[ChatCompletionMessageParam], messages),
+                max_tokens=settings.get("max_tokens", 8000),
+                temperature=settings.get("temperature", 0.85),
+                top_p=settings.get("top_p", 0.95),
+                frequency_penalty=settings.get("frequency_penalty", 0.7),
+                presence_penalty=settings.get("presence_penalty", 0.7),
+            )
+            reply = response.choices[0].message.content or ""
+            # Retry once if reply is empty/whitespace
+            if not reply.strip():
+                if attempt < max_retries:
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+                    continue
+                return None
+            return reply
+        except Exception:
+            if attempt < max_retries:
+                await asyncio.sleep(1.0 * (2 ** attempt))
+                continue
+            raise
+
+
+# ─────────────────────────────────────────────
+#  Scene Detail Variants
+# ─────────────────────────────────────────────
+
+def get_scene_detail(scene: dict) -> str:
+    """Pick a random detail variant for the scene, if any."""
+    variants = scene.get("detail_variants", [])
+    if not variants:
+        return ""
+    return random.choice(variants)
+
+
+# ─────────────────────────────────────────────
+#  Age-Verification Gate
+# ─────────────────────────────────────────────
+
+AGE_VERIFY_PROMPT = (
+    "🔞 **Age verification required**\n\n"
+    "I need you to confirm you are 18+ before we continue.\n"
+    "Run `/verify` (or `.verify`) to confirm your age and unlock the bot."
+)
+
+
+def is_verified(user_id: int) -> bool:
+    """Check whether a user has completed age verification."""
+    profile = user_profiles.get(str(user_id))
+    return bool(profile and profile.get("verified"))
+
+
+async def require_verification_prefix(interaction: discord.Interaction):
+    """Send an age-verification prompt for slash commands. Returns True if verified."""
+    if is_verified(interaction.user.id):
+        return True
+    await interaction.response.send_message(AGE_VERIFY_PROMPT, ephemeral=True)
+    return False
+
+# ─────────────────────────────────────────────
 #  Image Generation (Pollinations.ai)
 # ─────────────────────────────────────────────
 IMAGE_CACHE_FILE = os.path.join(os.path.dirname(__file__), "image_cache.json")
@@ -360,6 +565,11 @@ async def on_message(message: discord.Message):
     if not (bot_mentioned or is_dm):
         return
 
+    # Age gate — must verify before any in-character content
+    if not is_verified(message.author.id):
+        await message.channel.send(AGE_VERIFY_PROMPT)
+        return
+
     # Rate limiting
     user_id = message.author.id
     now = datetime.now(timezone.utc)
@@ -385,6 +595,20 @@ async def on_message(message: discord.Message):
 
         conversation_histories[cid].append({"role": "user", "content": user_text})
 
+        # ── Update profile (message count, last interaction, relationship stage) ──
+        profile = get_or_create_profile(user_id)
+        new_count = profile.get("message_count", 0) + 1
+        update_profile(
+            user_id,
+            message_count=new_count,
+            last_interaction=now.isoformat(),
+            relationship_stage=get_relationship_stage(new_count),
+        )
+
+        # ── Memory summarization every N messages, before trimming ──
+        if new_count % MEMORY_SUMMARY_INTERVAL == 0:
+            await summarize_conversation(cid, user_id)
+
         system_prompt = personality.get("system_prompt", personality.get("systemPrompt", ""))
 
         # Add current outfit and scene context to system prompt
@@ -396,7 +620,10 @@ async def on_message(message: discord.Message):
 
         # Append outfit and scene details to system prompt
         outfit_context = f"\n\n[CURRENT OUTFIT: {current_outfit.get('name', 'Unknown')}]\n{current_outfit.get('appearance', '')}"
+        scene_detail = get_scene_detail(current_scene)
         scene_context = f"\n\n[CURRENT SCENE: {current_scene.get('name', 'Unknown')}]\n{current_scene.get('atmosphere', '')}"
+        if scene_detail:
+            scene_context += f"\n{scene_detail}"
 
         enhanced_system_prompt = system_prompt + outfit_context + scene_context
 
@@ -406,25 +633,32 @@ async def on_message(message: discord.Message):
         if "first" in narration_pref:
             enhanced_system_prompt += "\n\n[NARRATION MODE: First-person]"
 
+        # ── Inject profile memory + relationship stage ──
+        if profile.get("memory_summary"):
+            enhanced_system_prompt += f"\n\n[WHAT YOU REMEMBER ABOUT THIS PERSON]\n{profile['memory_summary']}"
+        enhanced_system_prompt += f"\n\n[RELATIONSHIP STAGE: {profile.get('relationship_stage', 'new')}]"
+
+        # ── Environment/presence awareness (only in guilds where author is a Member) ──
+        author = message.author
+        if isinstance(author, discord.Member) and author.activity and author.activity.name:
+            enhanced_system_prompt += f"\n\n[NOTE: user's Discord status shows activity '{author.activity.name}']"
+
         trimmed = trim_conversation(conversation_histories[cid], enhanced_system_prompt)
         messages = [{"role": "system", "content": enhanced_system_prompt}] + trimmed
 
         try:
             settings = personality.get("settings", {}).get("generation", {})
 
-            # Use model from personality.json or default
-            model_name = personality.get("settings", {}).get("model", {}).get("name", "agnes-3.0-flash")
+            reply = await agnes_chat_create(messages, settings)
 
-            response = await agnes_client.chat.completions.create(
-                model=model_name,
-                messages=cast(list[ChatCompletionMessageParam], messages),
-                max_tokens=settings.get("max_tokens", 8000),
-                temperature=settings.get("temperature", 0.85),
-                top_p=settings.get("top_p", 0.95),
-                frequency_penalty=settings.get("frequency_penalty", 0.7),
-                presence_penalty=settings.get("presence_penalty", 0.7),
-            )
-            reply = response.choices[0].message.content or ""
+            if reply is None:
+                # Empty reply after retry — send graceful fallback
+                fallback = "...hmm, I zoned out for a second there. Can you say that again?"
+                conversation_histories[cid].append({"role": "assistant", "content": fallback})
+                save_history(conversation_histories)
+                await message.reply(fallback)
+                print("⚠️  Empty reply from agnes; sent fallback message")
+                return
 
             # Apply anti-repetition filter
             reply = detect_and_fix_repetition(reply)
@@ -533,6 +767,49 @@ async def reset_convo(ctx):
         await ctx.send("🔄 Your conversation history has been cleared.")
     else:
         await ctx.send("ℹ️  You don't have any conversation history yet.")
+
+@bot.command(name="verify")
+async def verify_cmd(ctx):
+    """Confirm you are 18+ to unlock the bot."""
+    user_id = ctx.author.id
+    profile = get_or_create_profile(user_id)
+    profile["verified"] = True
+    save_profiles(user_profiles)
+    await ctx.send("✅ Thanks! You're verified — we're officially getting to know each other now.")
+    print(f"🔞  User {user_id} verified 18+ (prefix)")
+
+@bot.command(name="profile")
+async def profile_cmd(ctx):
+    """Show your stored profile."""
+    profile = get_or_create_profile(ctx.author.id)
+
+    embed = discord.Embed(title=f"👤 Your Profile: {ctx.author}", color=0x5865F2)
+    embed.add_field(name="Nickname", value=profile.get("nickname") or "_(not set)_", inline=True)
+    embed.add_field(name="Relationship Stage", value=profile.get("relationship_stage", "new"), inline=True)
+    embed.add_field(name="Messages", value=str(profile.get("message_count", 0)), inline=True)
+    embed.add_field(name="Recurring Topics", value="\n".join(profile.get("recurring_topics", [])) or "_(none yet)_", inline=False)
+    embed.add_field(
+        name="Memory Summary",
+        value=profile.get("memory_summary") or "_(nothing remembered yet)_",
+        inline=False,
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name="forgetme")
+async def forgetme_cmd(ctx):
+    """Delete your profile and all conversation history entries for your user_id."""
+    user_id_str = str(ctx.author.id)
+
+    user_profiles.pop(user_id_str, None)
+    save_profiles(user_profiles)
+
+    removed = [cid for cid in list(conversation_histories) if user_id_str in cid]
+    for cid in removed:
+        del conversation_histories[cid]
+    save_history(conversation_histories)
+
+    await ctx.send(f"🧹 Done — your profile and {len(removed)} conversation thread(s) have been deleted.")
+    print(f"🧹  User {user_id_str} requested full data removal (prefix)")
 
 @bot.command(name="narration")
 async def narration_cmd(ctx, mode: str | None = None):
@@ -678,6 +955,9 @@ async def bot_help(ctx):
 
     user_cmds = [
         ("@bot <message>", "Chat with the bot"),
+        (".verify", "Confirm you're 18+ to unlock the bot"),
+        (".profile", "View your stored profile"),
+        (".forgetme", "Delete your profile and all conversation history"),
         (".resetconvo", "Clear your conversation history"),
         (".contextinfo", "Show your token usage"),
         (".wardrobe", "View current outfit or list outfits"),
@@ -982,6 +1262,10 @@ async def scene_cmd(ctx, action: str | None = None, *, scene_id: str | None = No
         # Update personality state
         if "state" in personality:
             personality["state"]["current_scene"] = scene_id
+
+        # Track last_scene on the calling user's profile
+        if is_verified(ctx.author.id):
+            update_profile(ctx.author.id, last_scene=scene_id)
 
         embed = discord.Embed(title=f"✅ Scene Changed!", color=0x00FF00)
         embed.add_field(name="Now At", value=f"{scene.get('emoji', '🎬')} {scene.get('name', scene_id)}", inline=False)
@@ -1325,13 +1609,33 @@ async def slash_chat(interaction: discord.Interaction, message: str):
         await interaction.response.send_message("⚠️ Please provide a message.", ephemeral=True)
         return
 
+    # Age gate
+    if not is_verified(interaction.user.id):
+        await interaction.response.send_message(AGE_VERIFY_PROMPT, ephemeral=True)
+        return
+
     async with cast(discord.abc.Messageable, interaction.channel).typing():
         cid = f"{interaction.channel.id}_{interaction.user.id}"  # type: ignore[union-attr]
+        user_id = interaction.user.id
 
         if cid not in conversation_histories:
             conversation_histories[cid] = []
 
         conversation_histories[cid].append({"role": "user", "content": user_text})
+
+        # ── Update profile ──
+        profile = get_or_create_profile(user_id)
+        new_count = profile.get("message_count", 0) + 1
+        update_profile(
+            user_id,
+            message_count=new_count,
+            last_interaction=datetime.now(timezone.utc).isoformat(),
+            relationship_stage=get_relationship_stage(new_count),
+        )
+
+        # ── Memory summarization every N messages ──
+        if new_count % MEMORY_SUMMARY_INTERVAL == 0:
+            await summarize_conversation(cid, user_id)
 
         system_prompt = personality.get("system_prompt", personality.get("systemPrompt", ""))
         current_outfit_id = wardrobe.get("current_outfit", "poolside_bikini")
@@ -1340,33 +1644,45 @@ async def slash_chat(interaction: discord.Interaction, message: str):
         current_scene = scenes.get("scenes", {}).get(current_scene_id, {})
 
         outfit_context = f"\n\n[CURRENT OUTFIT: {current_outfit.get('name', 'Unknown')}]\n{current_outfit.get('appearance', '')}"
+        scene_detail = get_scene_detail(current_scene)
         scene_context = f"\n\n[CURRENT SCENE: {current_scene.get('name', 'Unknown')}]\n{current_scene.get('atmosphere', '')}"
+        if scene_detail:
+            scene_context += f"\n{scene_detail}"
 
         enhanced_system_prompt = system_prompt + outfit_context + scene_context
 
-        # Inject narration mode hint from user preference (stored in personality.json)
+        # Inject narration mode hint from user preference
         user_prefs = personality.get("user_prefs", {})
         narration_pref = user_prefs.get(cid, personality.get("advanced", {}).get("narration_style", "first_person"))
         if "first" in narration_pref:
             enhanced_system_prompt += "\n\n[NARRATION MODE: First-person]"
+
+        # ── Inject profile memory + relationship stage ──
+        if profile.get("memory_summary"):
+            enhanced_system_prompt += f"\n\n[WHAT YOU REMEMBER ABOUT THIS PERSON]\n{profile['memory_summary']}"
+        enhanced_system_prompt += f"\n\n[RELATIONSHIP STAGE: {profile.get('relationship_stage', 'new')}]"
+
+        # ── Environment/presence awareness (only in guilds where user is a Member) ──
+        inter_user = interaction.user
+        if isinstance(inter_user, discord.Member) and inter_user.activity and inter_user.activity.name:
+            enhanced_system_prompt += f"\n\n[NOTE: user's Discord status shows activity '{inter_user.activity.name}']"
 
         trimmed = trim_conversation(conversation_histories[cid], enhanced_system_prompt)
         messages = [{"role": "system", "content": enhanced_system_prompt}] + trimmed
 
         try:
             settings = personality.get("settings", {}).get("generation", {})
-            model_name = personality.get("settings", {}).get("model", {}).get("name", "agnes-3.0-flash")
 
-            response = await agnes_client.chat.completions.create(
-                model=model_name,
-                messages=cast(list[ChatCompletionMessageParam], messages),
-                max_tokens=settings.get("max_tokens", 8000),
-                temperature=settings.get("temperature", 0.85),
-                top_p=settings.get("top_p", 0.95),
-                frequency_penalty=settings.get("frequency_penalty", 0.7),
-                presence_penalty=settings.get("presence_penalty", 0.7),
-            )
-            reply = response.choices[0].message.content or ""
+            reply = await agnes_chat_create(messages, settings)
+
+            if reply is None:
+                fallback = "...hmm, I zoned out for a second there. Can you say that again?"
+                conversation_histories[cid].append({"role": "assistant", "content": fallback})
+                save_history(conversation_histories)
+                await interaction.followup.send(fallback)
+                print("⚠️  Empty reply from agnes; sent fallback message")
+                return
+
             reply = detect_and_fix_repetition(reply)
             conversation_histories[cid].append({"role": "assistant", "content": reply})
             save_history(conversation_histories)
@@ -1482,6 +1798,9 @@ async def slash_status(interaction: discord.Interaction, activity_type: str | No
 @app_commands.describe(description="Optional description")
 async def slash_selfie(interaction: discord.Interaction, description: str = ""):
     """Generate a selfie image."""
+    if not is_verified(interaction.user.id):
+        await interaction.response.send_message(AGE_VERIFY_PROMPT, ephemeral=True)
+        return
     await interaction.response.send_message("🎨 Generating your selfie...", ephemeral=True)
 
     current_outfit = wardrobe.get("outfits", {}).get(wardrobe.get("current_outfit", ""), {})
@@ -1507,6 +1826,9 @@ async def slash_selfie(interaction: discord.Interaction, description: str = ""):
 @app_commands.describe(description="Pose description")
 async def slash_pose(interaction: discord.Interaction, description: str = ""):
     """Generate a pose image."""
+    if not is_verified(interaction.user.id):
+        await interaction.response.send_message(AGE_VERIFY_PROMPT, ephemeral=True)
+        return
     await interaction.response.send_message("🎨 Generating your pose...", ephemeral=True)
 
     current_outfit = wardrobe.get("outfits", {}).get(wardrobe.get("current_outfit", ""), {})
@@ -1532,6 +1854,9 @@ async def slash_pose(interaction: discord.Interaction, description: str = ""):
 @app_commands.describe(prompt="Image description")
 async def slash_image(interaction: discord.Interaction, prompt: str):
     """Generate a custom AI image."""
+    if not is_verified(interaction.user.id):
+        await interaction.response.send_message(AGE_VERIFY_PROMPT, ephemeral=True)
+        return
     await interaction.response.send_message("🎨 Generating your image...", ephemeral=True)
 
     user_seed = get_character_seed(interaction.user.id)
@@ -1541,6 +1866,60 @@ async def slash_image(interaction: discord.Interaction, prompt: str):
         await interaction.followup.send(f"🖼️ Your image! (seed: {user_seed})", file=discord.File(io.BytesIO(image_bytes), filename="image.png"))
     else:
         await interaction.followup.send("⚠️ Failed to generate image. Try again later.")
+
+@bot.tree.command(name="verify", description="Confirm you are 18+ to unlock the bot")
+async def slash_verify(interaction: discord.Interaction):
+    """Age-verify the calling user."""
+    user_id = interaction.user.id
+    profile = get_or_create_profile(user_id)
+    profile["verified"] = True
+    save_profiles(user_profiles)
+    await interaction.response.send_message(
+        f"✅ Thanks, **{interaction.user}**! You're verified. We're officially getting to know each other now.",
+        ephemeral=True,
+    )
+    print(f"🔞  User {user_id} verified 18+")
+
+
+@bot.tree.command(name="profile", description="Show your stored profile (nickname, stage, memory)")
+async def slash_profile(interaction: discord.Interaction):
+    """Show the calling user's profile."""
+    profile = get_or_create_profile(interaction.user.id)
+
+    embed = discord.Embed(title=f"👤 Your Profile: {interaction.user}", color=0x5865F2)
+    embed.add_field(name="Nickname", value=profile.get("nickname") or "_(not set)_", inline=True)
+    embed.add_field(name="Relationship Stage", value=profile.get("relationship_stage", "new"), inline=True)
+    embed.add_field(name="Messages", value=str(profile.get("message_count", 0)), inline=True)
+    embed.add_field(name="Recurring Topics", value="\n".join(profile.get("recurring_topics", [])) or "_(none yet)_", inline=False)
+    embed.add_field(
+        name="Memory Summary",
+        value=profile.get("memory_summary") or "_(nothing remembered yet)_",
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="forgetme", description="Delete your profile and conversation history")
+async def slash_forgetme(interaction: discord.Interaction):
+    """Delete the caller's profile and all conversation history entries containing their user_id."""
+    user_id_str = str(interaction.user.id)
+
+    # Delete profile
+    user_profiles.pop(user_id_str, None)
+    save_profiles(user_profiles)
+
+    # Delete conversation history entries containing this user_id
+    removed = [cid for cid in list(conversation_histories) if user_id_str in cid]
+    for cid in removed:
+        del conversation_histories[cid]
+    save_history(conversation_histories)
+
+    await interaction.response.send_message(
+        f"🧹 Done — your profile and {len(removed)} conversation thread(s) have been deleted.",
+        ephemeral=True,
+    )
+    print(f"🧹  User {user_id_str} requested full data removal (profile + {len(removed)} history entries)")
+
 
 @bot.tree.command(name="seed", description="Show your character seed")
 async def slash_seed(interaction: discord.Interaction):
@@ -1586,9 +1965,8 @@ async def on_command_error(ctx, error):
         print(f"❌  Command error: {error}")
 
 
-# ─────────────────────────────────────────────
 #  Run
-# ─────────────────────────────────────────────
+
 if __name__ == "__main__":
     print(f"🚀  Starting bot from: {os.path.abspath(__file__)}")
     print(f"📁  History file: {HISTORY_FILE}")

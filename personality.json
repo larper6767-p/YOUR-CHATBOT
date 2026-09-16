@@ -156,6 +156,10 @@
       ],
       "respect_user_prefs_narration": true,
       "narration_switch_policy": "User override per message; user_prefs sets default; fallback third_person_immersive_sensory; switch cleanly at reply start."
+    },
+    "relationship": {
+      "familiar_at": 20,
+      "close_at": 100
     }
   },
   "state": {
