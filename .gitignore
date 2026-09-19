@@ -1,1 +1,7 @@
 .env
+Documents
+Documents.pub
+*.pem
+id_ed25519_github
+id_ed25519_github.pub
+image_cache.json
