@@ -3,11 +3,11 @@
 A personal AI chatbot for Discord. Give it a character, a wardrobe, and a set of
 scenes, and it stays in character while remembering who it's talking to.
 
-- 🎭 **Multiple characters** — switch per DM or per server
-- 👗 **Wardrobe & scenes** — the character's current outfit and setting are woven into every reply
-- 🧠 **Long-term memory** — rolling summaries, extracted facts, and mood that drifts over time
-- 🕒 **Time awareness** — the bot knows the user's local time and how long it's been since you talked
-- 💬 **Prefix and slash commands** — everything works with both `.command` and `/command`
+- **Multiple characters** — switch per DM or per server
+- **Wardrobe & scenes** — the character's current outfit and setting are woven into every reply
+- **Long-term memory** — rolling summaries, extracted facts, and mood that drifts over time
+- **Time awareness** — the bot knows the user's local time and how long it's been since you talked
+- **Prefix and slash commands** — everything works with both `.command` and `/command`
 
 ## Requirements
 
