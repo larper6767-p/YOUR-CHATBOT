@@ -1,0 +1,12 @@
+{
+  "scenes": {
+    "poolside": {
+      "name": "Poolside",
+      "description": "A sunny pool area with lounge chairs and sparkling water",
+      "emoji": "🏊",
+      "atmosphere": "The sparkling blue pool glistens under the sunlight. Lounge chairs are scattered around. The scent of chlorine mixes with sunscreen. It's warm and inviting.",
+      "tags": ["outdoor", "water", "summer"]
+    }
+  },
+  "current_scene": "poolside"
+}

@@ -1,7 +1,26 @@
+# ── Secrets / environment ───────────────────────────────
 .env
+
+# ── SSH keys and personal files ─────────────────────────
 Documents
 Documents.pub
 *.pem
 id_ed25519_github
 id_ed25519_github.pub
+
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# ── Runtime state & private user data ───────────────────
+# Character definitions are meant to be committed; conversation history and
+# user profiles are private and are recreated automatically at runtime.
+data/active_characters.json
+data/histories/*.json
+data/profiles/*.json
+
+# ── Misc ────────────────────────────────────────────────
 image_cache.json
